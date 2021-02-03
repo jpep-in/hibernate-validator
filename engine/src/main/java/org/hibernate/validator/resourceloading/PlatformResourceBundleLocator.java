@@ -6,10 +6,12 @@
  */
 package org.hibernate.validator.resourceloading;
 
+import static org.hibernate.validator.internal.util.CollectionHelper.newArrayList;
 import static org.hibernate.validator.internal.util.CollectionHelper.newHashSet;
 import static org.hibernate.validator.internal.util.logging.Messages.MESSAGES;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Method;
 import java.net.URL;
@@ -17,6 +19,7 @@ import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.Collections;
 import java.util.Enumeration;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -24,7 +27,6 @@ import java.util.MissingResourceException;
 import java.util.PropertyResourceBundle;
 import java.util.ResourceBundle;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import org.hibernate.validator.Incubating;
 import org.hibernate.validator.internal.util.CollectionHelper;
@@ -305,38 +307,40 @@ public class PlatformResourceBundleLocator implements ResourceBundleLocator {
 	private static class AggregateResourceBundle extends ResourceBundle {
 
 		protected static final Control CONTROL = new AggregateResourceBundleControl();
-		private final Set<PropertyResourceBundle> properties;
 
-		protected AggregateResourceBundle(Set<PropertyResourceBundle> properties) {
-			this.properties = properties;
-		}
+		@Immutable
+		private final Map<String, Object> properties;
 
-		/**
-		 * Search object key in each properties until founded. If duplicated key, first value is returned
-		 */
-		@Override
-		protected Object handleGetObject(String key) {
-			for ( PropertyResourceBundle property : properties ) {
-				Object object = property.handleGetObject( key );
-				if ( object != null ) {
-					return object;
+		protected AggregateResourceBundle(List<PropertyResourceBundle> propertyResourceBundles) {
+			Map<String, Object> properties = new HashMap<>();
+			for ( PropertyResourceBundle propertyResourceBundle : propertyResourceBundles ) {
+				Enumeration<String> keys = propertyResourceBundle.getKeys();
+				while ( keys.hasMoreElements() ) {
+					String key = keys.nextElement();
+					properties.put( key, propertyResourceBundle.getObject( key ) );
 				}
 			}
-			return null;
+			this.properties = CollectionHelper.toImmutableMap( properties );
+		}
+
+		@Override
+		protected Object handleGetObject(String key) {
+			return properties.get( key );
+		}
+
+		@Override
+		protected Set<String> handleKeySet() {
+			return properties.keySet();
 		}
 
 		@Override
 		public Enumeration<String> getKeys() {
-			Set<String> keySet = newHashSet();
-			List<String> keys = properties.stream()
-					.map( PropertyResourceBundle::getKeys )
-					.map( Collections::list )
-					.flatMap( List::stream )
-					.collect( Collectors.toList() );
-			keySet.addAll( keys );
+			Set<String> keySet = newHashSet( properties.keySet() );
+
 			if ( parent != null ) {
 				keySet.addAll( Collections.list( parent.getKeys() ) );
 			}
+
 			return Collections.enumeration( keySet );
 		}
 	}
@@ -356,19 +360,21 @@ public class PlatformResourceBundleLocator implements ResourceBundleLocator {
 			}
 
 			String resourceName = toBundleName( baseName, locale ) + ".properties";
-			Set<PropertyResourceBundle> properties = load( resourceName, loader );
+			List<PropertyResourceBundle> properties = load( resourceName, loader );
 			return properties.isEmpty() ? null : new AggregateResourceBundle( properties );
 		}
 
-		private static Set<PropertyResourceBundle> load(String resourceName, ClassLoader loader) throws IOException {
-			Set<PropertyResourceBundle> aggregatedProperties = newHashSet();
+		private static List<PropertyResourceBundle> load(String resourceName, ClassLoader loader) throws IOException {
+			List<PropertyResourceBundle> aggregatedProperties = newArrayList();
 			Enumeration<URL> urls = run( GetResources.action( loader, resourceName ) );
 			while ( urls.hasMoreElements() ) {
 				URL url = urls.nextElement();
-				PropertyResourceBundle propertyResourceBundle = new PropertyResourceBundle( url.openStream() );
-				aggregatedProperties.add( propertyResourceBundle );
+				try ( InputStream propertyStream = url.openStream() ) {
+					PropertyResourceBundle propertyResourceBundle = new PropertyResourceBundle( propertyStream );
+					aggregatedProperties.add( propertyResourceBundle );
+				}
 			}
-			return aggregatedProperties;
+			return CollectionHelper.toImmutableList( aggregatedProperties );
 		}
 	}
 }
